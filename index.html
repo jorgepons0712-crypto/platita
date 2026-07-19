@@ -847,24 +847,54 @@ function parseCLP(v){
   if (s.includes(',')) s = s.split(',')[0];
   return parseInt(s.replace(/\D/g, '')) || 0;
 }
+const normTxt = s => String(s || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
 async function importPendientes(){
   let text = '';
   try { text = await navigator.clipboard.readText(); }
   catch(e){ return toast('No pude leer el portapapeles 📋'); }
+  const ok = importFromText(text);
+  if (ok) { try { await navigator.clipboard.writeText(' '); } catch(e){} }
+}
+
+// formato: PLATITA|monto|nota|fecha|categoría — nota, fecha y categoría son opcionales
+function importFromText(text){
   const lines = (text || '').split('\n').map(l => l.trim()).filter(l => l.startsWith('PLATITA|'));
-  if (!lines.length) return toast('No hay gastos pendientes 📋');
-  importQueue = lines.map(l => {
+  if (!lines.length) { toast('No hay gastos pendientes 📋'); return false; }
+  const items = lines.map(l => {
     const p = l.split('|');
-    // fecha del pago: "2026-07-19 22:35" (la manda el atajo); si falta o es inválida, ahora
+    // fecha del pago: "2026-07-19 22:35"; si falta o es inválida, ahora
     let ts = Date.parse(String(p[3] || '').trim().replace(' ', 'T'));
     if (isNaN(ts)) ts = Date.now();
-    return { amount: parseCLP(p[1]), note: (p[2] || '').trim().slice(0, 60), ts, date: ymd(new Date(ts)) };
+    return { amount: parseCLP(p[1]), note: (p[2] || '').trim().slice(0, 60),
+             ts, date: ymd(new Date(ts)), cat: (p[4] || '').trim() };
   }).filter(x => x.amount > 0);
-  importQueue.sort((a, b) => a.ts - b.ts);
-  if (!importQueue.length) return toast('No pude leer los montos 🤔');
-  try { await navigator.clipboard.writeText(' '); } catch(e){}
-  toast(`${importQueue.length} gasto${importQueue.length > 1 ? 's' : ''} por confirmar 📥`);
-  setTimeout(nextImport, 600);
+  if (!items.length) { toast('No pude leer los montos 🤔'); return false; }
+  items.sort((a, b) => a.ts - b.ts);
+
+  // con categoría reconocida → se agregan solos; el resto pasa por la hoja
+  let added = 0;
+  importQueue = [];
+  for (const it of items){
+    const match = it.cat && db.cats.gasto.find(c => normTxt(c.n) === normTxt(it.cat));
+    if (match){
+      db.tx.push({ id: uid(), type: 'gasto', amount: it.amount, category: match.id,
+                   date: it.date, ts: it.ts, note: it.note });
+      added++;
+    } else {
+      importQueue.push(it);
+    }
+  }
+  if (added) save();
+  render();
+  if (added && importQueue.length)
+    toast(`${added} importado${added > 1 ? 's' : ''} ✅ · ${importQueue.length} por categorizar 📥`);
+  else if (added)
+    toast(`${added} gasto${added > 1 ? 's' : ''} importado${added > 1 ? 's' : ''} ✅`);
+  else
+    toast(`${importQueue.length} gasto${importQueue.length > 1 ? 's' : ''} por confirmar 📥`);
+  if (importQueue.length) setTimeout(nextImport, 600);
+  return true;
 }
 function nextImport(){
   const item = importQueue.shift();
