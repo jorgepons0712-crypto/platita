@@ -279,10 +279,11 @@ function load(){
     const d = JSON.parse(localStorage.getItem('platita'));
     if (d && Array.isArray(d.tx)){
       if (!d.cats) d.cats = JSON.parse(JSON.stringify(DEFAULT_CATS));
+      if (!d.sync) d.sync = { url: '', ids: [] };
       return d;
     }
   } catch(e){}
-  return { tx: [], rec: [], cats: JSON.parse(JSON.stringify(DEFAULT_CATS)), ver: 2 };
+  return { tx: [], rec: [], cats: JSON.parse(JSON.stringify(DEFAULT_CATS)), sync: { url: '', ids: [] }, ver: 2 };
 }
 function save(){ localStorage.setItem('platita', JSON.stringify(db)); }
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
@@ -570,6 +571,10 @@ function renderSet(){
       <div class="set-row" id="editCats"><div>Categorías<div class="sub">Crear, editar o eliminar categorías</div></div><span class="chev">›</span></div>
     </div>
     <div class="card">
+      <div class="set-row" id="syncNow"><div>Sincronizar correo ahora<div class="sub">${db.sync.url ? 'Robot conectado ✅ · trae los cargos del banco' : 'Sin conectar todavía'}</div></div><span class="chev">📧</span></div>
+      <div class="set-row" id="syncCfg"><div>${db.sync.url ? 'Cambiar enlace del robot' : 'Conectar con el correo'}<div class="sub">Pega aquí el enlace del robot de Gmail</div></div><span class="chev">›</span></div>
+    </div>
+    <div class="card">
       <div class="set-row" id="expCsv"><div>Exportar a CSV<div class="sub">Para abrir en Excel o Numbers</div></div><span class="chev">›</span></div>
       <div class="set-row" id="expJson"><div>Respaldar datos<div class="sub">Descarga un archivo con todo (${n} movimientos)</div></div><span class="chev">›</span></div>
       <div class="set-row" id="impJson"><div>Restaurar respaldo<div class="sub">Importa un archivo de respaldo</div></div><span class="chev">›</span></div>
@@ -583,6 +588,14 @@ function renderSet(){
     <input type="file" id="fileIn" accept=".json" style="display:none">`;
 
   document.getElementById('editCats').onclick = () => { view = 'cats'; render(); };
+  document.getElementById('syncNow').onclick = () => syncCorreo(true);
+  document.getElementById('syncCfg').onclick = () => {
+    const u = prompt('Pega el enlace del robot de Google (termina en /exec).\nDéjalo vacío para desconectar.', db.sync.url || '');
+    if (u === null) return;
+    db.sync.url = u.trim();
+    save(); render();
+    toast(db.sync.url ? 'Correo conectado ✅ Toca "Sincronizar correo ahora"' : 'Correo desconectado');
+  };
   document.getElementById('expCsv').onclick = () => {
     const rows = [['fecha','tipo','categoria','nota','monto']];
     for (const t of [...db.tx].sort((a,b)=>a.date.localeCompare(b.date)))
@@ -820,6 +833,7 @@ function drawSheet(){
       } else {
         db.tx.push({ id: uid(), type:s.type, amount, category:s.category, date, note,
                      ts: (s.importTs && date === ymd(new Date(s.importTs))) ? s.importTs : Date.now() });
+        if (s.syncId && !db.sync.ids.includes(s.syncId)) db.sync.ids.push(s.syncId);
       }
       save(); toast(it ? 'Actualizado ✅' : (s.type==='gasto' ? 'Gasto anotado ✅' : 'Ingreso anotado ✅'));
       const [y,m] = date.split('-').map(Number);
@@ -928,7 +942,65 @@ function nextImport(){
   sheetState.note = item.note;
   sheetState.date = item.date;
   sheetState.importTs = item.ts;
+  sheetState.syncId = item.syncId || null;
   drawSheet();
+}
+
+/* ================= sincronización con el correo (robot de Gmail) ================= */
+async function syncCorreo(manual){
+  const url = (db.sync.url || '').trim();
+  if (!url) { if (manual) toast('Primero conecta el correo 📧'); return; }
+  let data;
+  try {
+    const r = await fetch(url);
+    data = await r.json();
+  } catch(e){ if (manual) toast('No pude conectar con el robot 📧🤔'); return; }
+  if (!data || !Array.isArray(data.movs)) { if (manual) toast('El enlace no respondió como esperaba 🤔'); return; }
+
+  const seen = new Set(db.sync.ids);
+  let added = 0; const queue = [];
+  for (const m of data.movs){
+    if (!m || !m.id || seen.has(m.id)) continue;
+    seen.add(m.id);
+    const amount = Math.round(Number(m.monto)) || 0;
+    if (amount <= 0){ db.sync.ids.push(m.id); continue; }
+    let ts = Date.parse(String(m.fecha || '').replace(' ', 'T'));
+    if (isNaN(ts)) ts = Date.now();
+    const type = m.tipo === 'ingreso' ? 'ingreso' : 'gasto';
+    // mismo monto y hora parecida → ya llegó por el atajo de Apple Pay
+    const dup = db.tx.find(t => t.type === type && t.amount === amount && Math.abs(txTs(t) - ts) < 10*60*1000);
+    if (dup){ db.sync.ids.push(m.id); continue; }
+    const note = String(m.detalle || '').trim().slice(0, 60);
+    if (type === 'ingreso'){
+      const cid = db.cats.ingreso.some(c => c.id === m.cat) ? m.cat
+                : db.cats.ingreso.some(c => c.id === 'extra') ? 'extra' : db.cats.ingreso[0].id;
+      db.tx.push({ id: uid(), type, amount, category: cid, date: ymd(new Date(ts)), ts, note });
+      added++; db.sync.ids.push(m.id);
+      continue;
+    }
+    // si antes categorizaste un gasto con la misma nota, aprende y repite la categoría
+    const k = catKey(note);
+    const prev = k && [...db.tx].reverse().find(t => t.type === 'gasto' && t.category && catKey(t.note) === k);
+    if (prev){
+      db.tx.push({ id: uid(), type, amount, category: prev.category, date: ymd(new Date(ts)), ts, note });
+      added++; db.sync.ids.push(m.id);
+    } else {
+      queue.push({ amount, note, ts, date: ymd(new Date(ts)), syncId: m.id });
+    }
+  }
+  db.sync.ids = db.sync.ids.slice(-800);
+  save();
+  if (added || manual) render();
+  if (added || queue.length){
+    queue.sort((a, b) => a.ts - b.ts);
+    importQueue = importQueue.concat(queue);
+    if (added && queue.length) toast(`📧 ${added} del banco ✅ · ${queue.length} por categorizar`);
+    else if (added) toast(`📧 ${added} movimiento${added > 1 ? 's' : ''} del banco ✅`);
+    else toast(`📧 ${queue.length} del banco por categorizar`);
+    if (queue.length && !sheetState) setTimeout(nextImport, 600);
+  } else if (manual) {
+    toast('Nada nuevo del banco ✅');
+  }
 }
 
 /* ================= url params (hook para Atajos de iOS) ================= */
@@ -951,6 +1023,7 @@ function checkUrlParams(){
 applyRecurring();
 render();
 checkUrlParams();
+if (db.sync.url) setTimeout(() => syncCorreo(false), 900);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script>
 </body>
