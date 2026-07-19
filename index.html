@@ -214,6 +214,14 @@
   .tile { background:var(--surface); border:1px solid var(--border); border-radius:18px; padding:14px; }
   .tile .cap { font-size:12px; color:var(--muted); font-weight:500; }
   .tile .val { font-size:21px; font-weight:700; margin-top:3px; letter-spacing:-0.01em; }
+  .pie-wrap { display:flex; align-items:center; gap:16px; }
+  .pie-svg { width:46%; max-width:180px; flex-shrink:0; display:block; }
+  .pie-legend { flex:1; min-width:0; display:flex; flex-direction:column; gap:9px; }
+  .pie-row { display:flex; align-items:flex-start; gap:8px; }
+  .pie-dot { width:10px; height:10px; border-radius:3.5px; flex-shrink:0; margin-top:4px; }
+  .pie-txt { min-width:0; }
+  .pie-name { font-size:13.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pie-sub { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; margin-top:1px; }
 
   /* ---------- settings ---------- */
   .set-row {
@@ -342,7 +350,7 @@ const $app = document.getElementById('app');
 
 function render(){
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.v === view || (view === 'cats' && b.dataset.v === 'set')));
-  document.getElementById('fab').style.display = (view === 'home' || view === 'stats') ? '' : 'none';
+  document.getElementById('fab').style.display = (view === 'home') ? '' : 'none';
   if (view === 'home')  renderHome();
   if (view === 'stats') renderStats();
   if (view === 'rec')   renderRec();
@@ -453,39 +461,70 @@ function renderHome(){
   });
 }
 
+const PIE_COLORS = ['#3987e5','#f08c1a','#16a34a','#8b5cf6','#ec4899','#0d9488','#ef4444','#ca8a04','#6366f1','#a16207','#6b7280','#e8543f'];
+
 function renderStats(){
-  // last 6 months ending at curMonth
-  const months = [];
-  for (let i = 5; i >= 0; i--){
-    const d = new Date(curMonth.getFullYear(), curMonth.getMonth()-i, 1);
-    months.push({ key: ym(d), lab: MESES[d.getMonth()].slice(0,3), ...totals(ym(d)) });
-  }
-  const maxV = Math.max(1, ...months.map(m => Math.max(m.ing, m.gas)));
   const key = ym(curMonth), t = totals(key);
-  const nTx = txOfMonth(key).length;
+  const txs = txOfMonth(key);
+  const nTx = txs.length;
   const daysIn = new Date(curMonth.getFullYear(), curMonth.getMonth()+1, 0).getDate();
   const today = new Date();
   const isCur = ym(today) === key;
   const elapsed = isCur ? today.getDate() : daysIn;
   const avgDay = t.gas / Math.max(1, elapsed);
 
-  // SVG grouped bars — gastos (blue) vs ingresos (green)
-  const W = 480, H = 190, padL = 8, padB = 26, plotH = H - padB - 8;
-  const groupW = (W - padL*2) / 6;
-  const barW = 16, gap = 2;
-  let bars = '', labels = '';
-  months.forEach((m, i) => {
-    const cx = padL + groupW*i + groupW/2;
-    const hG = Math.round(m.gas / maxV * (plotH - 4));
-    const hI = Math.round(m.ing / maxV * (plotH - 4));
-    const cur = m.key === key;
-    bars += `<g class="mgroup" data-i="${i}" style="cursor:pointer">
-      <rect x="${cx-barW-gap/2}" y="${8+plotH-hG}" width="${barW}" height="${Math.max(hG,2)}" rx="4" fill="var(--blue)" opacity="${cur?1:.55}"/>
-      <rect x="${cx+gap/2}" y="${8+plotH-hI}" width="${barW}" height="${Math.max(hI,2)}" rx="4" fill="var(--green)" opacity="${cur?1:.55}"/>
-      <rect x="${cx-groupW/2}" y="0" width="${groupW}" height="${H}" fill="transparent"/>
-    </g>`;
-    labels += `<text x="${cx}" y="${H-8}" text-anchor="middle" font-size="11.5" fill="var(--muted)" font-weight="${cur?'700':'500'}">${m.lab}</text>`;
-  });
+  // pie de gastos por categoría del mes seleccionado
+  const byCat = {};
+  for (const x of txs) if (x.type === 'gasto') byCat[x.category] = (byCat[x.category]||0) + x.amount;
+  const cats = Object.entries(byCat).sort((a,b) => b[1]-a[1]);
+
+  let pieHtml;
+  if (!cats.length){
+    pieHtml = `<div class="card"><h2>Gastos por categoría</h2>
+      <div class="empty" style="padding:24px 12px">Sin gastos este mes 🌱</div>
+    </div>`;
+  } else {
+    const R = 96, C = 100;
+    const compact = v => v >= 1e6
+      ? '$' + (v/1e6).toLocaleString('es-CL', {maximumFractionDigits:1}) + 'M'
+      : fmt(v);
+    let ang = -Math.PI/2, slices = '';
+    cats.forEach(([cid, amt], i) => {
+      const frac = amt / t.gas;
+      const a2 = ang + frac * Math.PI * 2;
+      const col = PIE_COLORS[i % PIE_COLORS.length];
+      if (frac >= .999){
+        slices += `<circle cx="${C}" cy="${C}" r="${R}" fill="${col}"/>`;
+      } else {
+        const x1 = C + R*Math.cos(ang), y1 = C + R*Math.sin(ang);
+        const x2 = C + R*Math.cos(a2), y2 = C + R*Math.sin(a2);
+        slices += `<path d="M${C},${C} L${x1.toFixed(2)},${y1.toFixed(2)} A${R},${R} 0 ${frac > .5 ? 1 : 0} 1 ${x2.toFixed(2)},${y2.toFixed(2)} Z" fill="${col}" stroke="var(--surface)" stroke-width="1.5"/>`;
+      }
+      ang = a2;
+    });
+    const legend = cats.map(([cid, amt], i) => {
+      const c = catOf('gasto', cid);
+      const pct = Math.round(amt / t.gas * 100);
+      return `<div class="pie-row">
+        <span class="pie-dot" style="background:${PIE_COLORS[i % PIE_COLORS.length]}"></span>
+        <div class="pie-txt">
+          <div class="pie-name">${c.e} ${c.n}</div>
+          <div class="pie-sub">${fmt(amt)} · ${pct}%</div>
+        </div>
+      </div>`;
+    }).join('');
+    pieHtml = `<div class="card"><h2>Gastos por categoría</h2>
+      <div class="pie-wrap">
+        <svg viewBox="0 0 200 200" class="pie-svg" role="img" aria-label="Distribución de gastos por categoría">
+          ${slices}
+          <circle cx="100" cy="100" r="58" fill="var(--surface)"/>
+          <text x="100" y="93" text-anchor="middle" font-size="11.5" fill="var(--muted)">Gastos</text>
+          <text x="100" y="112" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">${compact(t.gas)}</text>
+        </svg>
+        <div class="pie-legend">${legend}</div>
+      </div>
+    </div>`;
+  }
 
   $app.innerHTML = monthBar() + `
     <div class="stat-tiles">
@@ -494,26 +533,8 @@ function renderStats(){
       <div class="tile"><div class="cap">Ingresos del mes</div><div class="val" style="color:var(--good-text)">${fmt(t.ing)}</div></div>
       <div class="tile"><div class="cap">Gastos del mes</div><div class="val">${fmt(t.gas)}</div></div>
     </div>
-    <div class="card">
-      <h2>Últimos 6 meses</h2>
-      <div class="legend">
-        <span><span class="dot" style="background:var(--blue)"></span>Gastos</span>
-        <span><span class="dot" style="background:var(--green)"></span>Ingresos</span>
-      </div>
-      <div class="chart-wrap">
-        <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block" role="img" aria-label="Gastos e ingresos de los últimos 6 meses">
-          <line x1="${padL}" y1="${8+plotH}" x2="${W-padL}" y2="${8+plotH}" stroke="var(--hairline)" stroke-width="1"/>
-          ${bars}${labels}
-        </svg>
-      </div>
-      <div class="chart-note" id="chartNote">Toca un mes para ver los montos.</div>
-    </div>`;
+    ${pieHtml}`;
   bindMonthBar();
-  document.querySelectorAll('.mgroup').forEach(g => g.onclick = () => {
-    const m = months[+g.dataset.i];
-    document.getElementById('chartNote').innerHTML =
-      `<b style="text-transform:capitalize">${m.lab}</b> · Gastos ${fmt(m.gas)} · Ingresos ${fmt(m.ing)} · Balance ${fmtS(m.bal)}`;
-  });
 }
 
 function renderRec(){
