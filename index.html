@@ -869,6 +869,8 @@ function parseCLP(v){
   return parseInt(s.replace(/\D/g, '')) || 0;
 }
 const normTxt = s => String(s || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+// clave de comparaci\u00f3n que ignora emojis y s\u00edmbolos ("\ud83c\udf54 Comida" \u2261 "Comida")
+const catKey = s => normTxt(s).replace(/[^a-z0-9 ]/g, '').trim();
 
 async function importPendientes(){
   let text = '';
@@ -897,7 +899,8 @@ function importFromText(text){
   let added = 0;
   importQueue = [];
   for (const it of items){
-    const match = it.cat && db.cats.gasto.find(c => normTxt(c.n) === normTxt(it.cat));
+    const key = catKey(it.cat);
+    const match = it.cat && db.cats.gasto.find(c => key ? catKey(c.n) === key : normTxt(c.n) === normTxt(it.cat));
     if (match){
       db.tx.push({ id: uid(), type: 'gasto', amount: it.amount, category: match.id,
                    date: it.date, ts: it.ts, note: it.note });
