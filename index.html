@@ -62,7 +62,13 @@
   }
 
   /* ---------- header / month picker ---------- */
-  .month-bar { display:flex; align-items:center; justify-content:center; gap:4px; padding:8px 0 4px; }
+  .month-bar { display:flex; align-items:center; justify-content:center; gap:4px; padding:8px 0 4px; position:relative; }
+  .imp-btn {
+    position:absolute; right:0; top:50%; transform:translateY(-50%);
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    width:40px; height:40px; font-size:18px; cursor:pointer;
+  }
+  .imp-btn:active { background:var(--wash); }
   .month-bar button {
     background:none; border:none; color:var(--ink-2); font-size:22px; line-height:1;
     width:44px; height:44px; border-radius:12px; cursor:pointer;
@@ -243,7 +249,7 @@
 <script>
 "use strict";
 /* ================= data ================= */
-const CATS = {
+const DEFAULT_CATS = {
   gasto: [
     {id:'comida', e:'🍔', n:'Comida'},   {id:'super', e:'🛒', n:'Súper'},
     {id:'transporte', e:'🚗', n:'Transporte'}, {id:'hogar', e:'🏠', n:'Hogar'},
@@ -257,18 +263,23 @@ const CATS = {
     {id:'devolucion', e:'↩️', n:'Devolución'}, {id:'otros', e:'💸', n:'Otros'}
   ]
 };
-const catOf = (type,id) => (CATS[type]||[]).find(c=>c.id===id) || {e:'💸', n:'Otros'};
+const catOf = (type,id) => (db.cats[type]||[]).find(c=>c.id===id) || {e:'💸', n:'Otros'};
 
 let db = load();
 function load(){
   try {
     const d = JSON.parse(localStorage.getItem('platita'));
-    if (d && Array.isArray(d.tx)) return d;
+    if (d && Array.isArray(d.tx)){
+      if (!d.cats) d.cats = JSON.parse(JSON.stringify(DEFAULT_CATS));
+      return d;
+    }
   } catch(e){}
-  return { tx: [], rec: [], ver: 1 };
+  return { tx: [], rec: [], cats: JSON.parse(JSON.stringify(DEFAULT_CATS)), ver: 2 };
 }
 function save(){ localStorage.setItem('platita', JSON.stringify(db)); }
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+// timestamp para ordenar dentro de un mismo día (los antiguos lo recuperan del id)
+const txTs = t => t.ts || parseInt(String(t.id).slice(0,8), 36) || 0;
 
 /* ================= helpers ================= */
 const fmt  = n => '$' + Math.round(Math.abs(n)).toLocaleString('es-CL');
@@ -305,7 +316,7 @@ function applyRecurring(){
       const due = new Date(cur.getFullYear(), cur.getMonth(), dueDay);
       if (!r.applied[key] && due <= now){
         db.tx.push({ id: uid(), type: r.type, amount: r.amount, category: r.category,
-                     date: ymd(due), note: r.note || '', recId: r.id });
+                     date: ymd(due), ts: due.getTime(), note: r.note || '', recId: r.id });
         r.applied[key] = true;
         changed = true;
       }
@@ -330,19 +341,21 @@ function totals(key){
 const $app = document.getElementById('app');
 
 function render(){
-  document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.v === view));
+  document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.v === view || (view === 'cats' && b.dataset.v === 'set')));
   document.getElementById('fab').style.display = (view === 'home' || view === 'stats') ? '' : 'none';
   if (view === 'home')  renderHome();
   if (view === 'stats') renderStats();
   if (view === 'rec')   renderRec();
   if (view === 'set')   renderSet();
+  if (view === 'cats')  renderCats();
 }
 
-function monthBar(){
+function monthBar(withImport){
   return `<div class="month-bar">
     <button id="mPrev" aria-label="Mes anterior">‹</button>
     <div class="month-label">${monthLabel(curMonth)}</div>
     <button id="mNext" aria-label="Mes siguiente">›</button>
+    ${withImport ? '<button class="imp-btn" id="impBtn" aria-label="Importar gastos pendientes" title="Importar de Apple Pay">📥</button>' : ''}
   </div>`;
 }
 function bindMonthBar(){
@@ -353,7 +366,7 @@ function bindMonthBar(){
 function renderHome(){
   const key = ym(curMonth);
   const t = totals(key);
-  const txs = txOfMonth(key).sort((a,b) => b.date.localeCompare(a.date) || (b.id > a.id ? 1 : -1));
+  const txs = txOfMonth(key).sort((a,b) => b.date.localeCompare(a.date) || txTs(b) - txTs(a));
 
   // category breakdown (expenses)
   const byCat = {};
@@ -414,7 +427,7 @@ function renderHome(){
     }
   }
 
-  $app.innerHTML = monthBar() + `
+  $app.innerHTML = monthBar(true) + `
     <div class="hero">
       <div class="cap">Balance del mes</div>
       <div class="big">${fmtS(t.bal)}</div>
@@ -427,6 +440,7 @@ function renderHome(){
     <h2 style="font-size:13px;font-weight:600;color:var(--muted);letter-spacing:.03em;text-transform:uppercase;margin:6px 4px 2px">Movimientos</h2>
     ${listHtml}`;
   bindMonthBar();
+  document.getElementById('impBtn').onclick = importPendientes;
   document.querySelectorAll('.cbar').forEach(g => g.onclick = () => {
     const [cid, amt] = cats[+g.dataset.i];
     const c = catOf('gasto', cid);
@@ -532,6 +546,9 @@ function renderSet(){
   const n = db.tx.length;
   $app.innerHTML = `<h1 class="page-title">Ajustes ⚙️</h1>
     <div class="card">
+      <div class="set-row" id="editCats"><div>Categorías<div class="sub">Crear, editar o eliminar categorías</div></div><span class="chev">›</span></div>
+    </div>
+    <div class="card">
       <div class="set-row" id="expCsv"><div>Exportar a CSV<div class="sub">Para abrir en Excel o Numbers</div></div><span class="chev">›</span></div>
       <div class="set-row" id="expJson"><div>Respaldar datos<div class="sub">Descarga un archivo con todo (${n} movimientos)</div></div><span class="chev">›</span></div>
       <div class="set-row" id="impJson"><div>Restaurar respaldo<div class="sub">Importa un archivo de respaldo</div></div><span class="chev">›</span></div>
@@ -544,6 +561,7 @@ function renderSet(){
     </p>
     <input type="file" id="fileIn" accept=".json" style="display:none">`;
 
+  document.getElementById('editCats').onclick = () => { view = 'cats'; render(); };
   document.getElementById('expCsv').onclick = () => {
     const rows = [['fecha','tipo','categoria','nota','monto']];
     for (const t of [...db.tx].sort((a,b)=>a.date.localeCompare(b.date)))
@@ -578,6 +596,63 @@ function renderSet(){
   };
 }
 
+function renderCats(){
+  const row = (type, c) => `<div class="set-row cat-edit" data-t="${type}" data-id="${c.id}">
+    <div><span style="font-size:19px;margin-right:8px">${c.e}</span>${esc(c.n)}</div><span class="chev">›</span></div>`;
+  $app.innerHTML = `
+    <h1 class="page-title" style="margin-bottom:4px">Categorías 🏷️</h1>
+    <div style="margin:0 4px 16px"><span id="backSet" style="color:var(--blue);font-size:15px;font-weight:600;cursor:pointer">‹ Volver a Ajustes</span></div>
+    <div class="card"><h2>Gastos</h2>
+      ${db.cats.gasto.map(c => row('gasto', c)).join('')}
+      <button class="btn ghost" id="newG" style="margin-top:12px">＋ Nueva categoría de gasto</button>
+    </div>
+    <div class="card"><h2>Ingresos</h2>
+      ${db.cats.ingreso.map(c => row('ingreso', c)).join('')}
+      <button class="btn ghost" id="newI" style="margin-top:12px">＋ Nueva categoría de ingreso</button>
+    </div>`;
+  document.getElementById('backSet').onclick = () => { view = 'set'; render(); };
+  document.getElementById('newG').onclick = () => openCatSheet('gasto', null);
+  document.getElementById('newI').onclick = () => openCatSheet('ingreso', null);
+  document.querySelectorAll('.cat-edit').forEach(el => el.onclick = () => {
+    const c = db.cats[el.dataset.t].find(x => x.id === el.dataset.id);
+    if (c) openCatSheet(el.dataset.t, c);
+  });
+}
+
+function openCatSheet(type, cat){
+  $sheet.innerHTML = `
+    <div class="grabber"></div>
+    <h2 style="font-size:19px;font-weight:700;margin:2px 2px 16px">${cat ? 'Editar' : 'Nueva'} categoría de ${type}</h2>
+    <div class="field"><label>Emoji</label><input id="catE" type="text" maxlength="4" value="${cat ? esc(cat.e) : ''}" placeholder="🍕" autocomplete="off"></div>
+    <div class="field"><label>Nombre</label><input id="catN" type="text" maxlength="18" value="${cat ? esc(cat.n) : ''}" placeholder="Pizza" autocomplete="off"></div>
+    <button class="btn" id="catSave">${cat ? 'Guardar cambios' : 'Crear categoría'}</button>
+    ${cat ? '<button class="btn danger" id="catDel">Eliminar categoría</button>' : ''}
+  `;
+  $overlay.classList.add('show');
+  $sheet.classList.add('show');
+  document.getElementById('catSave').onclick = () => {
+    const e = document.getElementById('catE').value.trim();
+    const n = document.getElementById('catN').value.trim();
+    if (!e) return toast('Falta el emoji 🙂');
+    if (!n) return toast('Falta el nombre');
+    if (cat) Object.assign(cat, { e, n });
+    else db.cats[type].push({ id: uid(), e, n });
+    save(); closeSheet(); render();
+    toast(cat ? 'Categoría actualizada ✅' : `Categoría ${e} ${n} creada ✅`);
+  };
+  const del = document.getElementById('catDel');
+  if (del) del.onclick = () => {
+    const used = db.tx.filter(t => t.category === cat.id).length;
+    const msg = used
+      ? `Esta categoría tiene ${used} movimiento${used > 1 ? 's' : ''}, que pasarán a verse como "💸 Otros". ¿Eliminar igual?`
+      : '¿Eliminar esta categoría?';
+    if (!confirm(msg)) return;
+    db.cats[type] = db.cats[type].filter(x => x.id !== cat.id);
+    save(); closeSheet(); render();
+    toast('Categoría eliminada 🗑');
+  };
+}
+
 function download(name, blob){
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name; a.click();
@@ -595,7 +670,11 @@ function openSheet(item, isRec){
     editing: item || null, isRec,
     type: item ? item.type : 'gasto',
     category: item ? item.category : null,
-    amount: item ? item.amount : ''
+    amount: item ? item.amount : '',
+    note: item ? (item.note || '') : '',
+    date: (item && item.date) ? item.date : ymd(new Date()),
+    day: (item && item.day !== undefined) ? item.day : new Date().getDate(),
+    newCat: false
   };
   drawSheet();
   $overlay.classList.add('show');
@@ -607,13 +686,22 @@ function closeSheet(){
   $sheet.classList.remove('show');
   sheetState = null;
 }
-$overlay.onclick = closeSheet;
+$overlay.onclick = () => { importQueue = []; closeSheet(); };
+
+// guarda lo escrito antes de re-dibujar la hoja
+function captureSheet(){
+  const s = sheetState;
+  const g = id => document.getElementById(id);
+  if (g('amtIn'))  s.amount = parseAmt(g('amtIn').value);
+  if (g('noteIn')) s.note = g('noteIn').value;
+  if (g('dateIn')) s.date = g('dateIn').value || s.date;
+  if (g('dayIn'))  s.day = g('dayIn').value;
+}
 
 function drawSheet(){
   const s = sheetState;
   const it = s.editing;
-  const today = ymd(new Date());
-  const cats = CATS[s.type];
+  const cats = db.cats[s.type];
   s.category = cats.some(c => c.id === s.category) ? s.category : null;
   $sheet.innerHTML = `
     <div class="grabber"></div>
@@ -626,15 +714,20 @@ function drawSheet(){
         value="${s.amount ? fmt(s.amount) : ''}" autocomplete="off">
     </div>
     <div class="cat-grid">${cats.map(c =>
-      `<div class="cat-cell ${s.category===c.id?'on':''}" data-c="${c.id}"><span class="e">${c.e}</span><span class="n">${c.n}</span></div>`
-    ).join('')}</div>
+      `<div class="cat-cell ${s.category===c.id?'on':''}" data-c="${c.id}"><span class="e">${c.e}</span><span class="n">${esc(c.n)}</span></div>`
+    ).join('')}<div class="cat-cell" data-c="__new" style="border-style:dashed"><span class="e">➕</span><span class="n">Nueva</span></div></div>
+    ${s.newCat ? `
+      <div class="field"><label>Emoji</label><input id="ncE" type="text" maxlength="4" placeholder="🍕" autocomplete="off"></div>
+      <div class="field"><label>Nombre</label><input id="ncN" type="text" maxlength="18" placeholder="Pizza" autocomplete="off"></div>
+      <button class="btn ghost" id="ncCreate" style="margin-bottom:10px">Crear categoría</button>
+    ` : ''}
     ${s.isRec ? `
       <div class="field"><label>Día del mes</label>
-        <input id="dayIn" type="number" min="1" max="31" value="${it ? it.day : new Date().getDate()}"></div>
+        <input id="dayIn" type="number" min="1" max="31" value="${s.day}"></div>
     ` : `
-      <div class="field"><label>Fecha</label><input id="dateIn" type="date" value="${it ? it.date : today}"></div>
+      <div class="field"><label>Fecha</label><input id="dateIn" type="date" value="${s.date}"></div>
     `}
-    <div class="field"><label>Nota</label><input id="noteIn" type="text" placeholder="opcional" value="${esc(it ? it.note : '')}" maxlength="60"></div>
+    <div class="field"><label>Nota</label><input id="noteIn" type="text" placeholder="opcional" value="${esc(s.note)}" maxlength="60"></div>
     ${s.isRec && it ? `
       <div class="field toggle-row"><label>Activo</label>
         <div class="switch"><input type="checkbox" id="activeIn" ${it.paused?'':'checked'}><div class="knob"></div></div></div>
@@ -645,15 +738,36 @@ function drawSheet(){
 
   // type switcher
   $sheet.querySelectorAll('.seg button').forEach(b => b.onclick = () => {
+    captureSheet();
     s.type = b.dataset.t;
-    s.amount = parseAmt(document.getElementById('amtIn').value);
     drawSheet();
   });
   // categories
   $sheet.querySelectorAll('.cat-cell').forEach(el => el.onclick = () => {
+    if (el.dataset.c === '__new'){
+      captureSheet();
+      s.newCat = true;
+      drawSheet();
+      document.getElementById('ncE').focus();
+      return;
+    }
     s.category = el.dataset.c;
     $sheet.querySelectorAll('.cat-cell').forEach(x => x.classList.toggle('on', x.dataset.c === s.category));
   });
+  // crear categoría al vuelo
+  const ncBtn = document.getElementById('ncCreate');
+  if (ncBtn) ncBtn.onclick = () => {
+    const e = document.getElementById('ncE').value.trim();
+    const n = document.getElementById('ncN').value.trim();
+    if (!e) return toast('Falta el emoji 🙂');
+    if (!n) return toast('Falta el nombre de la categoría');
+    const nc = { id: uid(), e, n };
+    db.cats[s.type].push(nc); save();
+    captureSheet();
+    s.category = nc.id; s.newCat = false;
+    drawSheet();
+    toast(`Categoría ${e} ${n} creada ✅`);
+  };
   // live thousands formatting
   const amtIn = document.getElementById('amtIn');
   amtIn.oninput = () => {
@@ -679,17 +793,19 @@ function drawSheet(){
       }
       save(); applyRecurring(); toast(it ? 'Recurrente actualizado ✅' : 'Recurrente creado 🔁');
     } else {
-      const date = document.getElementById('dateIn').value || today;
+      const date = document.getElementById('dateIn').value || ymd(new Date());
       if (it){
         Object.assign(it, { type:s.type, amount, category:s.category, date, note });
       } else {
-        db.tx.push({ id: uid(), type:s.type, amount, category:s.category, date, note });
+        db.tx.push({ id: uid(), type:s.type, amount, category:s.category, date, note,
+                     ts: (s.importTs && date === ymd(new Date(s.importTs))) ? s.importTs : Date.now() });
       }
       save(); toast(it ? 'Actualizado ✅' : (s.type==='gasto' ? 'Gasto anotado ✅' : 'Ingreso anotado ✅'));
       const [y,m] = date.split('-').map(Number);
       curMonth = new Date(y, m-1, 1);
     }
     closeSheet(); render();
+    if (importQueue.length) setTimeout(nextImport, 400);
   };
 
   const del = document.getElementById('delBtn');
@@ -723,19 +839,57 @@ document.getElementById('nav').innerHTML = NAV.map(x =>
 document.querySelectorAll('#nav button').forEach(b => b.onclick = () => { view = b.dataset.v; render(); });
 document.getElementById('fab').onclick = () => openSheet();
 
+/* ================= importar desde Atajos / Apple Pay ================= */
+let importQueue = [];
+// "$5.990" → 5990 · "12.500,00" → 12500
+function parseCLP(v){
+  let s = String(v || '').trim();
+  if (s.includes(',')) s = s.split(',')[0];
+  return parseInt(s.replace(/\D/g, '')) || 0;
+}
+async function importPendientes(){
+  let text = '';
+  try { text = await navigator.clipboard.readText(); }
+  catch(e){ return toast('No pude leer el portapapeles 📋'); }
+  const lines = (text || '').split('\n').map(l => l.trim()).filter(l => l.startsWith('PLATITA|'));
+  if (!lines.length) return toast('No hay gastos pendientes 📋');
+  importQueue = lines.map(l => {
+    const p = l.split('|');
+    // fecha del pago: "2026-07-19 22:35" (la manda el atajo); si falta o es inválida, ahora
+    let ts = Date.parse(String(p[3] || '').trim().replace(' ', 'T'));
+    if (isNaN(ts)) ts = Date.now();
+    return { amount: parseCLP(p[1]), note: (p[2] || '').trim().slice(0, 60), ts, date: ymd(new Date(ts)) };
+  }).filter(x => x.amount > 0);
+  importQueue.sort((a, b) => a.ts - b.ts);
+  if (!importQueue.length) return toast('No pude leer los montos 🤔');
+  try { await navigator.clipboard.writeText(' '); } catch(e){}
+  toast(`${importQueue.length} gasto${importQueue.length > 1 ? 's' : ''} por confirmar 📥`);
+  setTimeout(nextImport, 600);
+}
+function nextImport(){
+  const item = importQueue.shift();
+  if (!item) return;
+  openSheet();
+  sheetState.amount = item.amount;
+  sheetState.note = item.note;
+  sheetState.date = item.date;
+  sheetState.importTs = item.ts;
+  drawSheet();
+}
+
 /* ================= url params (hook para Atajos de iOS) ================= */
 function checkUrlParams(){
   const p = new URLSearchParams(location.search);
   if (p.has('monto')){
-    const monto = parseAmt(p.get('monto'));
+    const monto = parseCLP(p.get('monto'));
     const nota = p.get('nota') || '';
     const cat = p.get('cat') || null;
     history.replaceState(null, '', location.pathname);
     openSheet();
     sheetState.amount = monto;
-    if (cat && CATS.gasto.some(c => c.id === cat)) sheetState.category = cat;
+    sheetState.note = nota;
+    if (cat && db.cats.gasto.some(c => c.id === cat)) sheetState.category = cat;
     drawSheet();
-    if (nota) document.getElementById('noteIn').value = nota;
   }
 }
 
