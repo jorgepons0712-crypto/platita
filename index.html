@@ -894,7 +894,7 @@ async function importPendientes(){
   if (ok) { try { await navigator.clipboard.writeText(' '); } catch(e){} }
 }
 
-// formato: PLATITA|monto|nota|fecha|categoría — nota, fecha y categoría son opcionales
+// formato: PLATITA|monto|nota|fecha|categoría|tipo — nota, fecha, categoría y tipo son opcionales (tipo: "gasto" por defecto o "ingreso")
 function importFromText(text){
   const lines = (text || '').split('\n').map(l => l.trim()).filter(l => l.startsWith('PLATITA|'));
   if (!lines.length) { toast('No hay gastos pendientes 📋'); return false; }
@@ -903,7 +903,8 @@ function importFromText(text){
     // fecha del pago: "2026-07-19 22:35"; si falta o es inválida, ahora
     let ts = Date.parse(String(p[3] || '').trim().replace(' ', 'T'));
     if (isNaN(ts)) ts = Date.now();
-    return { amount: parseCLP(p[1]), note: (p[2] || '').trim().slice(0, 60),
+    const type = (p[5] || '').trim() === 'ingreso' ? 'ingreso' : 'gasto';
+    return { type, amount: parseCLP(p[1]), note: (p[2] || '').trim().slice(0, 60),
              ts, date: ymd(new Date(ts)), cat: (p[4] || '').trim() };
   }).filter(x => x.amount > 0);
   if (!items.length) { toast('No pude leer los montos 🤔'); return false; }
@@ -914,9 +915,9 @@ function importFromText(text){
   importQueue = [];
   for (const it of items){
     const key = catKey(it.cat);
-    const match = it.cat && db.cats.gasto.find(c => key ? catKey(c.n) === key : normTxt(c.n) === normTxt(it.cat));
+    const match = it.cat && db.cats[it.type].find(c => key ? catKey(c.n) === key : normTxt(c.n) === normTxt(it.cat));
     if (match){
-      db.tx.push({ id: uid(), type: 'gasto', amount: it.amount, category: match.id,
+      db.tx.push({ id: uid(), type: it.type, amount: it.amount, category: match.id,
                    date: it.date, ts: it.ts, note: it.note });
       added++;
     } else {
@@ -928,9 +929,9 @@ function importFromText(text){
   if (added && importQueue.length)
     toast(`${added} importado${added > 1 ? 's' : ''} ✅ · ${importQueue.length} por categorizar 📥`);
   else if (added)
-    toast(`${added} gasto${added > 1 ? 's' : ''} importado${added > 1 ? 's' : ''} ✅`);
+    toast(`${added} importado${added > 1 ? 's' : ''} ✅`);
   else
-    toast(`${importQueue.length} gasto${importQueue.length > 1 ? 's' : ''} por confirmar 📥`);
+    toast(`${importQueue.length} por confirmar 📥`);
   if (importQueue.length) setTimeout(nextImport, 600);
   return true;
 }
@@ -938,6 +939,7 @@ function nextImport(){
   const item = importQueue.shift();
   if (!item) return;
   openSheet();
+  sheetState.type = item.type || 'gasto';
   sheetState.amount = item.amount;
   sheetState.note = item.note;
   sheetState.date = item.date;

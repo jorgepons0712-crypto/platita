@@ -20,6 +20,19 @@ function doGet() {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+// Llamado por el atajo "Anotar Gasto Correo" apenas llega un correo del banco:
+// recibe asunto/cuerpo/fecha de ESE correo y devuelve el gasto ya parseado
+// (solo gastos: las devoluciones/abonos se ignoran acá, esos entran solos
+// la próxima vez que se abra la app).
+function doPost(e) {
+  var body = JSON.parse(e.postData.contents);
+  var fecha = body.fecha ? new Date(body.fecha) : new Date();
+  var m = parsear(body.asunto || '', body.cuerpo || '', fecha);
+  return ContentService
+    .createTextOutput(JSON.stringify({ ok: true, mov: m }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
 function leerMovimientos() {
   var threads = GmailApp.search('from:(bancochile.cl) newer_than:' + DIAS + 'd');
   var movs = [];
